@@ -2,7 +2,8 @@
 
 import * as vscode from 'vscode';
 import * as remark from 'remark';
-import { resolveMany } from 'npm-module-path';
+import * as YAML from 'yaml';
+import * as npm_module_path from 'npm-module-path';
 
 import { fileRead } from './utils/fs';
 
@@ -54,7 +55,7 @@ function getWorkspaceConfig() {
 			try {
 				return require(files[0].fsPath);
 			} catch (err) {
-				return 'SyntaxError';
+				return 'Error reading JS config';
 			}
 		}
 
@@ -62,14 +63,18 @@ function getWorkspaceConfig() {
 			try {
 				return JSON.parse(content);
 			} catch (err) {
-				return 'SyntaxError';
+				try {
+					return YAML.parse(content);
+				} catch (err) {
+					return 'Error reading JSON/YAML config';
+				}
 			}
 		});
 	});
 }
 
 function getPlugins(list: string[]): Promise<IPlugin[]> {
-	const root = vscode.workspace.rootPath || '';
+	const root = vscode.workspace.workspaceFolders[0].uri.path || '';
 
 	const pluginList = list.map((name) => {
 		if (typeof name === 'string') {
@@ -79,7 +84,7 @@ function getPlugins(list: string[]): Promise<IPlugin[]> {
 		return 'remark-' + name[0];
 	});
 
-	return resolveMany(pluginList, root).then((filepaths) => {
+	return npm_module_path.resolveMany(pluginList, root).then((filepaths) => {
 		return filepaths.map((filepath, index) => <IPlugin>{
 			name: list[index],
 			package: filepath !== undefined ? require(filepath) : undefined,
@@ -107,7 +112,6 @@ async function getRemarkSettings() {
 		plugins: [],
 		rules: {}
 	}, remarkSettings);
-
 	return remarkSettings;
 }
 
@@ -116,11 +120,10 @@ async function runRemark(document: vscode.TextDocument, range: vscode.Range): Pr
 	const errors: IPluginError[] = [];
 	const remarkSettings = await getRemarkSettings();
 
-	let plugins = [];
+	var plugins = (Array.isArray(remarkSettings.plugins)) ? remarkSettings.plugins : Object.keys(remarkSettings.plugins);
 	if (remarkSettings.plugins.length !== 0) {
-		plugins = await getPlugins(remarkSettings.plugins);
+		plugins = await getPlugins(plugins);
 	}
-
 	api = api.use({ settings: remarkSettings.rules });
 
 	if (plugins.length !== 0) {
@@ -134,8 +137,11 @@ async function runRemark(document: vscode.TextDocument, range: vscode.Range): Pr
 			}
 
 			try {
-				const settings = plugin.settings !== undefined
+				var settings = plugin.settings !== undefined
 					? plugin.settings : remarkSettings[plugin.name];
+				if (settings == undefined) {
+					settings = remarkSettings.plugins[plugin.name];
+				}
 				if (settings !== undefined) {
 					api = api.use(plugin.package, settings);
 				} else {
@@ -154,7 +160,7 @@ async function runRemark(document: vscode.TextDocument, range: vscode.Range): Pr
 		let message = '';
 		errors.forEach((error) => {
 			if (error.err === 'Package not found') {
-				message += `[${error.name}]: ${error.err.toString()}. Use **npm i remark-${error.name}** or **npm i -g remark-${error.name}**.\n`;
+				message += `Error: [${error.name}]: ${error.err.toString()}. Use **npm i remark-${error.name}** or **npm i -g remark-${error.name}**.\n`;
 				return;
 			}
 
@@ -184,7 +190,9 @@ async function runRemark(document: vscode.TextDocument, range: vscode.Range): Pr
 				message += msg.toString() + '\n';
 			});
 
-			return Promise.reject(message);
+			if (message.toLowerCase().includes('error')) {
+				return Promise.reject(message);
+			}
 		}
 
 		return Promise.resolve({
